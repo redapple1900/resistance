@@ -1,17 +1,19 @@
+import sys
 import math
+
 
 class Variable(object):
     def __init__(self, total = 0.0, samples = 0):
         self.total = total 
         self.samples = samples
-        self.minimum = 'None'
-        self.maximum = None
+        self.minimum = +sys.maxsize - 1
+        self.maximum = -sys.maxsize + 1
 
     def sample(self, value):
         self.total += value
         self.samples += 1
         self.minimum = min(self.minimum, value)
-        self.maximum = min(self.maximum, value)
+        self.maximum = max(self.maximum, value)
 
     def estimate(self):
         if self.samples > 0:
@@ -45,8 +47,16 @@ class Variable(object):
         if self.samples:
             value = 100.0 * float(self.total) / float(self.samples)
             if value == 100.0:
-                return "100.0%"
+                return "100.%"
             return "{:4.1f}%".format(value)
         else:
             return "   N/A"
 
+    def __cmp__(self, other):
+        return cmp(self.estimate(), other.estimate())
+
+    def __iadd__(self, other):
+        self.total += other.total
+        self.samples += other.samples
+        self.minimum = min(self.minimum, other.minimum)
+        self.maximum = max(self.maximum, other.maximum)

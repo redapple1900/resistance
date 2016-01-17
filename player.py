@@ -1,6 +1,8 @@
 import logging
 import logging.handlers
 
+import core
+
 
 class Player(object):
     """A player in the game of resistance, identified by a unique index as the
@@ -19,8 +21,11 @@ class Player(object):
     """
 
     def __init__(self, name, index):
+        # Setup the two member variables first, then continue...
         self.name = name
         self.index = index
+        # This line is necessary for bots using mods as mix-in classes.
+        super(Player, self).__init__()
 
     def __repr__(self):
         return "%i-%s" % (self.index, self.name)
@@ -55,6 +60,9 @@ class Bot(Player):
        or warn() for instance.  The output is stored in a file in the #/logs/
        folder, named according to your bot. 
     """
+
+    __metaclass__ = core.Observable
+
 
     def onGameRevealed(self, players, spies):
         """This function will be called to list all the players, and if you're
@@ -116,9 +124,54 @@ class Bot(Player):
         """
         pass
 
+    def onMissionFailed(self, leader, team):
+        """Callback once a vote did not reach majority, failing the mission.
+        @param leader       The player responsible for selection.
+        @param team         The list of players chosen for the mission.
+        """
+        pass
+
+    def announce(self):
+        """Publicly state beliefs about the game's state by announcing spy
+        probabilities for any combination of players in the game.  This is
+        done after each mission completes, and takes the form of a mapping from
+        player to float.  Not all players must be specified, and of course this
+        can be innacurate!
+
+        @return dict[Player, float]     Mapping of player to spy probability.
+        """
+        return {}
+
+    def onAnnouncement(self, source, announcement):
+        """Callback if another player decides to announce beliefs about the
+        game.  This is passed as a potentially incomplete mapping from player
+        to spy probability.
+
+        @param source        Player making the announcement.
+        @param announcement  Dictionnary mapping players to spy probabilities.
+        """
+        pass
+
+    def say(self, message):
+        """Helper function to print a message in the global game chat, visible
+        by all the other players.
+
+        @param message       String containing free-form text.
+        """
+        self.log.info(message)
+
+    def onMessage(self, source, message):
+        """Callback if another player sends a general free-form message to the
+        channel.  This is passed in as a generic string that needs to be parsed.
+
+        @param source        Player sending the message.
+        @param announcement  Arbitrary string for the message sent.
+        """
+        pass
+
     def onGameComplete(self, win, spies):
         """Callback once the game is complete, and everything is revealed.
-        @param win          Boolean if the Resistance won.
+        @param win          Boolean true if the Resistance won.
         @param spies        List of only the spies in the game.
         """
         pass
@@ -135,7 +188,8 @@ class Bot(Player):
         @param index    Your own index in the player list.
         @param spy      Are you supposed to play as a spy?
         """
-        Player.__init__(self, self.__class__.__name__, index)
+        super(Bot, self).__init__(self.__class__.__name__, index)
+
         self.game = game
         self.spy = spy
 

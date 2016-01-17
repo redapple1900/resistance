@@ -12,22 +12,26 @@ class ResistanceLogger(logging.Handler):
     def __init__(self, protocol):
         logging.Handler.__init__(self)
         self.protocol = protocol
-        self.channel = None
+        self.client = None
 
     def flush(self):
         pass
 
     def emit(self, record):
-        if self.channel is None:
+        if self.client.channel is None:
             return
 
-        try:
-            msg = self.format(record)
-            self.protocol.msg(self.channel, 'COMMENT %s' % (msg))
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except:
-            self.handleError(record)
+        # try:
+        msg = self.format(record)
+        ch = self.client.channel if record.levelno < logging.INFO else self.client.game
+        prefix = "COMMENT " if record.levelno < logging.INFO else "[%i] " % (self.client.bot.index)
+        length = 300 # Maximum line for an IRC message is 510, so split string.
+        for line in [msg[i:i+length] for i in range(0, len(msg), length)]:
+            self.protocol.msg(ch, '%s%s' % (prefix, line))
+        # except (KeyboardInterrupt, SystemExit):
+        #    raise
+        # except:
+        #    self.handleError(record)
 
 
 class ResistanceClient(object):
@@ -38,11 +42,12 @@ class ResistanceClient(object):
         self.bots = {}
 
         self.channel = None
+        self.game = None
         self.logger = None
         self.sender = None
 
     def getBot(self):
-        return self.bots[self.channel]
+        return self.bots.get(self.channel, None)
 
     def reply(self, message):
         self.protocol.msg(self.channel, message)
@@ -51,13 +56,17 @@ class ResistanceClient(object):
         channel = msg.rstrip('.').split(' ')[1]
         self.protocol.join(channel)
 
-    def process_REVEAL(self, reveal, role, players, spies = None):
+        game = '-'.join(channel.split('-')[:2])
+        self.protocol.join(game)
+
+    def process_REVEAL(self, reveal, role, players, spies=None):
         # ROLE Resistance.
         index = self.channel.split('-')[-1]
         spy = bool(role.split(' ')[1] == 'Spy')
         bot = self.constructor(State(), int(index), spy)
         if self.logger is None:
             self.logger = ResistanceLogger(self.protocol)
+            self.logger.client = self
             bot.log.addHandler(self.logger)
             bot.log.setLevel(logging.DEBUG)
 
@@ -90,6 +99,11 @@ class ResistanceClient(object):
         # LEADER 1-Random.
         state.leader = self.makePlayer(leader.split(' ')[1])
 
+        state.phase = 1
+        state.team = None
+        state.votes = None
+        state.sabotages = None
+
         bot.onMissionAttempt(state.turn, state.tries, state.leader)
 
     def process_SELECT(self, select):
@@ -102,8 +116,9 @@ class ResistanceClient(object):
     def process_VOTE(self, team):
         # VOTE 1-Random, 2-Hippie, 3-Paranoid.
         bot = self.getBot()
-        bot.game.team = self.makeTeam(team)
+        bot.game.team = self.makeTeam(team)        
         bot.onTeamSelected(bot.game.leader, bot.game.team)
+        bot.game.phase = 2
         result = bot.vote(bot.game.team)
         reply = {True: "Yes", False: "No"}
         self.reply('VOTED %s.' % (reply[result]))
@@ -111,28 +126,37 @@ class ResistanceClient(object):
     def process_VOTES(self, votes):
         bot = self.getBot()
         v = [bool(b.strip(',.') == 'Yes') for b in votes.split(' ')[1:]]
-        bot.onVoteComplete(v)
+        bot.game.votes = v
+        bot.onVoteComplete(v)        
 
     def process_SABOTAGE(self, sabotage):
         bot = self.getBot()
+        bot.game.phase = 3
         result = bot.spy and bot.sabotage()
         reply = {True: "Yes", False: "No"}
         self.reply('SABOTAGED %s.' % (reply[result]))
 
     def process_SABOTAGES(self, sabotages):
         bot = self.getBot()
+        bot.game.phase = 3
         sabotaged = int(sabotages.split(' ')[1])
         if sabotaged == 0:
             bot.game.wins += 1
         else:
             bot.game.losses += 1
+
+        bot.game.sabotages = sabotaged
         bot.onMissionComplete(sabotaged)
 
-    def process_RESULT(self, result, spies):
+        bot.game.turn += 1
+        bot.game.turn = 1
+        bot.game.leader = None
+
+    def process_RESULT(self, result, spies=None):
         bot = self.getBot()
 
         w = bool(result.split(' ')[1] == 'Yes')
-        s = self.makeTeam(spies)
+        s = self.makeTeam(spies) if spies else bot.game.spies
 
         bot.onGameComplete(w, s)
         self.protocol.part(self.channel)
@@ -143,7 +167,21 @@ class ResistanceClient(object):
         if 'SELECT' in args[0].upper():
             selection = bot.select(bot.game.players, 3)
             players = [Player(s.name, s.index) for s in selection]
-            self.reply("QUERY %s" % (players))
+            self.reply("QUERY %s" % (players,))
+        if 'STATE' in args[0].upper():
+            self.reply("QUERY %r" % bot.game)
+
+    def process_ANNOUNCE(self, announce):
+        def bake(p, v):
+            return "%r: %f" % (Player(p.name, p.index), v)
+
+        bot = self.getBot()
+        bot.game.phase = 4
+        ann = bot.announce()
+        if ann:
+            self.reply("ANNOUNCED %s." % (', '.join([bake(*a) for a in ann.items()])))
+        else:
+            self.reply("ANNOUNCED.")
 
     def makeTeam(self, team):
         return set([self.makePlayer(t.strip('., ')) for t in team.split(' ')[1:]])
@@ -153,6 +191,26 @@ class ResistanceClient(object):
         return Player(name, int(index))
 
     def message(self, sender, channel, msg):
+        if 'player' not in channel:
+            if sender == 'aigamedev':
+                return
+
+            for ch, bot in self.bots.items():
+                s = [p for p in bot.game.players if p.name == sender]
+                if len(s) > 0 and channel in ch:
+                    self.sender = sender
+                    self.channel = channel + '-player-%i' % p.index
+                    self.game = channel
+                    self.bot = bot
+
+                    bot.onMessage(s, msg)
+
+            self.bot = None
+            self.game = None
+            self.channel = None
+            self.sender = None
+            return
+
         cmd = msg.split(' ')[0].rstrip('?!.')
         if not hasattr(self, 'process_'+cmd):
             return
@@ -161,18 +219,19 @@ class ResistanceClient(object):
         args = [i.strip(' ') for i in msg.rstrip('.?!').split(';')]
         self.sender = sender
         self.channel = channel
-        if self.logger is not None:
-            self.logger.channel = channel
+        self.game = '-'.join(channel.split('-')[:2])
+        self.bot = self.getBot()
 
         process(*args)
 
-        if self.logger is not None:
-            self.logger.channel = None
+        self.bot = None
+        self.game = None
         self.channel = None
         self.sender = None
 
-    def disconnect(self, user, channel = None):
+    def disconnect(self, user, channel=None):
         for ch, bot in list(self.bots.items()):
+            # print("Bot %r is leaving channel %s." % (bot, ch))
             if user != bot.recipient:
                 continue
             if not channel or ch == channel:
@@ -187,7 +246,7 @@ class ResistanceProtocol(irc.IRCClient):
         return self.factory.nickname
 
     def signedOn(self):
-        print("CONNECTED %s" % (self.nickname))
+        print("CONNECTED %s." % (self.nickname))
         self.client = ResistanceClient(self, self.factory.constructor)
         self.join('#resistance')
         self.msg('aigamedev', 'BOT')
@@ -212,7 +271,9 @@ class ResistanceProtocol(irc.IRCClient):
     def irc_INVITE(self, user, args):
         channel = args[1]
         if '#game-' in channel:
-            self.join(channel) 
+            self.join(channel)
+            game = '-'.join(channel.split('-')[:2])
+            self.join(game)
 
 
 class ResistanceFactory(protocol.ClientFactory):
@@ -224,11 +285,11 @@ class ResistanceFactory(protocol.ClientFactory):
         self.nickname = bot.__name__
 
     def clientConnectionLost(self, connector, reason):        
-        print('Connection lost.', reason)
+        print('DISCONNECT %s.' % self.nickname)
         connector.connect()
 
     def clientConnectionFailed(self, connector, reason):
-        print('Connection failed.', reason)
+        print('FAILURE %s.' % self.nickname)
         reactor.stop()
 
 
@@ -239,20 +300,11 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--name', type=str, required=False, default='aigamedev',
-                help = "Name of the IRC client that connects to the server.")
-    args = parser.parse_known_args()
+    parser.add_argument('--server', type=str, required=False, default='irc.aigamedev.com',
+                        help="Name of the IRC server to connect the specified bots to.")
+    args, remaining = parser.parse_known_args()
 
-    
-    if len(sys.argv) == 1:
-        print('USAGE: client.py file.BotName [...]')
-        sys.exit(-1)
-
-    server = 'localhost'
-    if 'irc.' in sys.argv[1]:
-        server = sys.argv.pop(1)
-
-    for cls in getCompetitors(sys.argv[1:]):
-        reactor.connectTCP(server, 6667, ResistanceFactory(cls))
+    for cls in getCompetitors(remaining):
+        reactor.connectTCP(args.server, 6667, ResistanceFactory(cls))
 
     reactor.run()
